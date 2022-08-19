@@ -39,7 +39,7 @@ QuickStart:
 4) Install System Pre-Reqs (assuming Ubuntu):
     pip install -r requirements.txt
 4) Configure. Edit example.ini with changes:
-  url=http://whereeverthisisrunning.com:8080/v2
+  url=http://whereeverthisisrunning.com/v2
   rules=sequenceTree (assuming this exists - it most likely doesnt)
 5) Start:
   ./start.sh
