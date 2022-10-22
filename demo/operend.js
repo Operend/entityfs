@@ -28,7 +28,7 @@ function fixPath(path)
     {
 	path="/"+path
     }
-    return conf.HIVE_URL+path
+    return conf.OPEREND_URL+path
 }
 
 exports.conf=conf;

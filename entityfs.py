@@ -23,7 +23,7 @@ import trio
 from os import fsencode, fsdecode
 from argparse import ArgumentParser
 
-ALLOW_PASSWORD = False
+ALLOW_PASSWORD = True
 ALLOW_TOKEN = True
 
 DEFAULT_CONFIG={
@@ -130,9 +130,10 @@ class BaseGHFS(pyfuse3.Operations):
             ALLOW_PASSWORD and
             config.has_option("entityfs","username") and
             config.has_option("entityfs","password")):
-
+            conf_username=config.get("entityfs","username");
+            conf_password=config.get("entityfs","password");
             if conf_username and conf_password:            
-                userpass_str = "{0}:{1}".format(self.username,self.password);
+                userpass_str = "{0}:{1}".format(conf_username,conf_password);
                 userpass_unencoded_bytes = bytes(userpass_str,"ascii");
                 userpass_b64_bytes = base64.b64encode(userpass_unencoded_bytes);
                 userpass_b64_ascii=userpass_b64_bytes.decode("ascii");
@@ -141,7 +142,7 @@ class BaseGHFS(pyfuse3.Operations):
         if not self.auth:
             print ("No credentials in config file")
             sys.exit(1)
-                
+
         self.url=config.get("entityfs","url");
         self._chunk_size=config.getint("entityfs","chunk_size")
         self._cache_limit=config.getint("entityfs","cache_limit");
@@ -153,6 +154,17 @@ class BaseGHFS(pyfuse3.Operations):
             self.verify_https=False
         else:
             raise GHFSConfigError("verify_https is not a boolean");
+        stream_redirect_str=config.get("entityfs","stream_redirect")
+        if stream_redirect_str:
+            if stream_redirect_str.upper() in ["TRUE","YES","1"]:
+                self.stream_redirect=True
+            elif stream_redirect_str.upper() in ["FALSE","NO","0"]:
+                self.stream_redirect=False
+            else:
+                raise GHFSConfigError("verify_https is not a boolean");
+        else:
+            self.stream_redirect=False;
+
         self._cache=GHFSCache(self._cache_limit);
         self._inodes={}
         
@@ -488,10 +500,14 @@ class BaseGHFS(pyfuse3.Operations):
         if not chunk:
             # if we don't have it yet...
             wfid=self.workfile_id_of_path(path);
-            relative_url="v2/WorkFileContents/{0}".format(wfid)
-            chunk=self._open_range(relative_url,
-                                   self._chunk_size,
-                                   self._chunk_size*chunk_of_first_byte).read();
+            if self.stream_redirect:
+                relative_url="v2/WorkFileStreams/{0}".format(wfid)
+            else:
+                relative_url="v2/WorkFileContents/{0}".format(wfid)
+            response=self._open_range(relative_url,
+                                      self._chunk_size,
+                                      self._chunk_size*chunk_of_first_byte);
+            chunk=response.read();
             self._cache.put(path,chunk_of_first_byte,chunk)
         start=offset-(chunk_of_first_byte*self._chunk_size);
         return chunk[start:start+size];            
