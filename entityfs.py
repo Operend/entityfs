@@ -23,7 +23,7 @@ import trio
 from os import fsencode, fsdecode
 from argparse import ArgumentParser
 
-ALLOW_PASSWORD = True
+ALLOW_PASSWORD = False
 ALLOW_TOKEN = True
 
 DEFAULT_CONFIG={
