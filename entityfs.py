@@ -29,7 +29,10 @@ ALLOW_TOKEN = True
 DEFAULT_CONFIG={
     "chunk_size":str(1024*1024),
     "cache_limit":str(1024),
-    "verify_https":"true"
+    "verify_https":"true",
+    "stream_redirect":False,
+    "stream_service":"",
+    "stream_region":"",
 };
 
 LOG_FORMAT="%(levelname)s | %(asctime)s | %(message)s"
@@ -164,6 +167,10 @@ class BaseGHFS(pyfuse3.Operations):
                 raise GHFSConfigError("verify_https is not a boolean");
         else:
             self.stream_redirect=False;
+
+        # these default to not specifying, leaving it up to server default
+        self.stream_service=config.get("entityfs","stream_service");
+        self.stream_region=config.get("entityfs","stream_region");
 
         self._cache=GHFSCache(self._cache_limit);
         self._inodes={}
@@ -501,7 +508,18 @@ class BaseGHFS(pyfuse3.Operations):
             # if we don't have it yet...
             wfid=self.workfile_id_of_path(path);
             if self.stream_redirect:
-                relative_url="v2/WorkFileStreams/{0}".format(wfid)
+                if self.stream_service and self.stream_region:
+                    relative_url=(
+                        "v2/WorkFileStreams/{0}?service={1}&region={2}".
+                        format(wfid,self.stream_service,self.stream_region))
+                elif self.stream_service:
+                    relative_url=("v2/WorkFileStreams/{0}?service={1}".
+                                  format(wfid,self.stream_service))
+                elif self.stream_region:
+                    relative_url=("v2/WorkFileStreams/{0}?region={1}".
+                                  format(wfid,self.stream_region))
+                else:
+                    relative_url="v2/WorkFileStreams/{0}".format(wfid)
             else:
                 relative_url="v2/WorkFileContents/{0}".format(wfid)
             response=self._open_range(relative_url,
