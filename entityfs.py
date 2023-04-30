@@ -33,6 +33,7 @@ DEFAULT_CONFIG={
     "stream_redirect":False,
     "stream_service":"",
     "stream_region":"",
+    "refresh_file":"",
 };
 
 LOG_FORMAT="%(levelname)s | %(asctime)s | %(message)s"
@@ -119,6 +120,8 @@ class GHFSINode(object):
 # get_entries_in_directory(self,path)->string[]
 # workfile_id_of_path(self,path)->string
 # and will probably use base class's openAPI(self,url) for API GET requests.
+# Derived classes that want to do a maintenance step before every operation
+# can override pre_operation(self)->void to do that (default is empty).
 class BaseGHFS(pyfuse3.Operations):
     def __init__(self, config):
         super().__init__();
@@ -172,6 +175,9 @@ class BaseGHFS(pyfuse3.Operations):
         self.stream_service=config.get("entityfs","stream_service");
         self.stream_region=config.get("entityfs","stream_region");
 
+        # defaults to empty string, meaning no refresh message file
+        self.refresh_file=config.get("entityfs","refresh_file");
+        
         self._cache=GHFSCache(self._cache_limit);
         self._inodes={}
         
@@ -286,6 +292,7 @@ class BaseGHFS(pyfuse3.Operations):
     # Assuming parent_inode is an inode we've already decided was a directory,
     # check if name is a name in that directory, and if so do getattr on it.
     async def lookup(self, parent_inode_number, name, ctx=None):
+        self.pre_operation();
         parent_inode = self._visit_inode_or_error(parent_inode_number)        
         self._visit_inode(parent_inode);        
         if parent_inode.node_type!="directory":
@@ -301,6 +308,7 @@ class BaseGHFS(pyfuse3.Operations):
     # getattr is closely connected to lookup, since both are returning
     # the same EntryAttributes object
     async def getattr(self,inode_number, ctx=None):
+        self.pre_operation();
         return self._getattr(inode_number);
     
     def _visit_inode(self,inode):
@@ -385,6 +393,7 @@ class BaseGHFS(pyfuse3.Operations):
     # return true if the operation should be "permitted" from OS perspective
     # (r/x on dir, r on file)
     async def access(self, inode_number, mode, ctx=None):
+        self.pre_operation();
         inode = self._visit_inode_or_error(inode_number)
         self._visit_inode(inode);
         if inode.node_type=="directory":
@@ -401,6 +410,7 @@ class BaseGHFS(pyfuse3.Operations):
 
     # get a new handle number associated with a directory inode
     async def opendir(self, inode_number, ctx):
+        self.pre_operation();
         inode = self._visit_inode_or_error(inode_number);
         if inode.node_type!="directory":
             raise FUSEError(errno.EACCES);            
@@ -413,6 +423,7 @@ class BaseGHFS(pyfuse3.Operations):
     # get a new handle number associated with a file inode,
     # return it in a FileInfo
     async def open(self, inode_number, flags, ctx):
+        self.pre_operation();
         inode = self._visit_inode_or_error(inode_number);
         if inode.node_type!="file":
             raise FUSEError(errno.EACCES);            
@@ -429,6 +440,7 @@ class BaseGHFS(pyfuse3.Operations):
     
     # get contents of directory, "returned" via readdir_reply callback system
     async def readdir(self,fh,offset, token):
+        self.pre_operation();
         if fh not in self._open_file_handles:
             raise FUSEError(errno.ENOENT);
         inode_number = self._open_file_handles[fh];
@@ -454,6 +466,7 @@ class BaseGHFS(pyfuse3.Operations):
         #  return file.read(size)
         # large reads might have requested a power of 2 well past the
         # actual EOF; restrain the size to actually fit in the file
+        self.pre_operation();
         if fh not in self._open_file_handles:
             raise FUSEError(errno.ENOENT);
         path = self._inodes[self._open_file_handles[fh]].path;
@@ -532,6 +545,7 @@ class BaseGHFS(pyfuse3.Operations):
 
     # discard a file handle 
     async def release(self,fh):
+        self.pre_operation();
         if fh in self._open_file_handles:
             inode=self._inodes[self._open_file_handles[fh]]
             del self._open_file_handles[fh];
@@ -541,10 +555,15 @@ class BaseGHFS(pyfuse3.Operations):
 
     # discard a file handle             
     async def releasedir(self,fh):
+        self.pre_operation();
         if fh in self._open_file_handles:
             inode=self._inodes[self._open_file_handles[fh]]            
             del self._open_file_handles[fh];
             inode.open_file_handles.remove(fh);
+
+    def pre_operation():
+        # Customization point for derived class
+        pass;
             
 class FlatGHFS(BaseGHFS):
     def __init__(self, config, *args, **kw):
@@ -645,20 +664,58 @@ class FlatGHFS(BaseGHFS):
             log_exception()
             return;
 
-# For now, this fetches a single static tree at mount time; assumption is
-# you mount GHFS to do work on files that are already in the server and
-# unmount it when you're done, so it doesn't need to track server-side
-# changes. Tracking server-side changes gets semantically complex!
+# This fetches a single static tree at mount time,
+# and updates the tree on request if a refresh signal is configured.
 class RuleGHFS(BaseGHFS):
     def __init__(self, config, *args, **kw):
         BaseGHFS.__init__(self, config, *args, **kw)
         rulestring=config.get("entityfs","rules");
+        self.rulestring_from_launch=rulestring;
         if ((rulestring.startswith("[") and rulestring.endswith("]")) or
              (rulestring.startswith("{") and rulestring.endswith("}"))):
-             self.fetch_tree_using_json(rulestring)
+             self.tree=self.fetch_tree_using_json(rulestring)
         else:
-             self.fetch_tree_using_names(rulestring.split(","));
+             self.tree=self.fetch_tree_using_names(rulestring.split(","));
+        if self.refresh_file:
+            self.refresh_file_modify_stamp=self.read_refresh_file_stamp();
 
+    def read_refresh_file_stamp(self):
+        try:
+            return os.stat(self.refresh_file).st_mtime;
+        except OSError:
+            return None;
+            
+    def pre_operation(self):
+        if self.refresh_file:
+            new_stamp=self.read_refresh_file_stamp();
+            if new_stamp!=self.refresh_file_modify_stamp:
+                self.refresh_file_modify_stamp=new_stamp;
+                self.refresh();
+        
+    def refresh(self):
+        try:
+            rulestring=self.rulestring_from_launch;
+            if ((rulestring.startswith("[") and rulestring.endswith("]")) or
+                (rulestring.startswith("{") and rulestring.endswith("}"))):
+                new_tree=self.fetch_tree_using_json(rulestring)
+            else:
+                new_tree=self.fetch_tree_using_names(rulestring.split(","));
+        except Exception:
+            logging.error("Failed to refresh! Proceeding without refresh.");
+            log_exception();
+            # couldn't do anything.. but we're not any worse off than if we
+            # hadn't attempted the refresh!
+            return;
+        try:
+            self.update_tree(new_tree);
+        except Exception:
+            logging.error("Internal error attempting to refresh!");
+            log_exception();
+            # This could mean we're now in an inconsistent state!
+            # Maybe better to visibly crash in this case.
+            raise;
+        
+            
     def fetch_tree_using_names(self,requested_rule_names):        
         # get file path rules...
         url="v2/FilePathTree";
@@ -676,7 +733,7 @@ class RuleGHFS(BaseGHFS):
             sys.exit(1);
         treeTXT=response.read().decode("utf8");
         logging.debug("Starting up, got tree from server: "+treeTXT);
-        self.tree=json.loads(treeTXT);
+        return json.loads(treeTXT);
 
     def fetch_tree_using_json(self,body):        
         # get file path rules...
@@ -689,11 +746,105 @@ class RuleGHFS(BaseGHFS):
             sys.exit(1);
         treeTXT=response.read().decode("utf8");
         logging.debug("Starting up, got tree from server: "+treeTXT);
-        self.tree=json.loads(treeTXT);
+        return json.loads(treeTXT);
 
+    def update_tree(self, new_tree):
+        # There's always a ROOT_INODE with "/" for the path, referring
+        # to a directory, and we can walk from there to reach all
+        # existing inodes. Inodes that don't exist yet don't need to
+        # be refreshed.
+        first_new_tree_node=self.get_node_from_explicit_tree("/",new_tree);
+        log_counters={};
+        self._update_directory_inode(self._inodes[pyfuse3.ROOT_INODE], new_tree,
+                                     first_new_tree_node, log_counters);
+        logging.info("Refreshed tree. Update actions taken: {}".
+                     format(log_counters))
+        
+    def _update_directory_inode(self, inode, new_tree, new_tree_node,
+                                log_counters):
+        def inc_log(name):
+            log_counters[name]=log_counters.get(name,0)+1;        
+        new_child_names=list(new_tree_node["dir"].keys());
+        new_children={}
+        for child_name in inode.children:
+            child_inode_number=inode.children[child_name];
+            child_inode=self._inodes[child_inode_number];
+            new_child_tree_node=self.get_node_from_explicit_tree(
+                child_inode.path, new_tree);
+            if not new_child_tree_node:
+                # Child no longer exists.
+                inc_log("remove_deleted");
+                self._invalidate_inode(child_inode);
+            elif "dir" in new_child_tree_node:
+                if child_inode.node_type=="directory":
+                    # Child is still a directory; update it in-place
+                    # without invalidating its inode.
+                    self._update_directory_inode(
+                        child_inode,new_tree,new_child_tree_node,
+                        log_counters);
+                    inc_log("keep_visited_directory");
+                    new_children[child_name]=child_inode.inode_number;
+                elif child_inode.node_type=="unvisited":
+                    # Child hasn't been accessed yet; its unvisited inode
+                    # number has nothing that needs invalidating.
+                    inc_log("keep_univisited_directory");
+                    new_children[child_name]=child_inode.inode_number;                    
+                else:
+                    # Child wasn't a directory, but its path is a
+                    # directory now; the old inode is invalid,
+                    # and we can treat the directory entry as
+                    # as an entirely new node.
+                    inc_log("replace_with_directory");
+                    self._invalidate_inode(child_inode);
+            else:
+                if (child_inode.node_type=="file" and
+                    "id" in new_child_tree_node and
+                    child_inode.workfile_id == new_child_tree_node["id"]):
+                    # Child is still a file, and still the same file;
+                    # its inode remains valid, and if a file handle was
+                    # open it is still open after the update.
+                    inc_log("keep_file")
+                    new_children[child_name]=child_inode.inode_number;
+                elif child_inode.node_type=="unvisited":
+                    # Child hasn't been accessed yet; there's no reason
+                    # to invalidate its reserved inode number.
+                    inc_log("keep_unvisited_file")
+                    new_children[child_name]=child_inode.inode_number;
+                else:
+                    # Child wasn't a file, or was a different file than
+                    # its path now refers to; the old inode is invalid
+                    # and we need to make a new one.
+                    inc_log("replace_with_file")
+                    self._invalidate_inode(child_inode);
+        for child_name in new_child_names:
+            if child_name not in new_children:
+                # This path entry didn't exist, or it existed but we
+                # just invalidated it because it points somewhere            
+                # different now. Allocate a new unvisited inode to become
+                # a child of the current one.
+                if inode.path[-1]=="/":
+                    new_path = inode.path+child_name
+                else:
+                    new_path = inode.path+"/"+child_name;
+                new_node = self._make_inode(new_path, inode.inode_number);
+                inc_log("new_node");
+                new_children[child_name]=new_node.inode_number;
+        inode.child_names=new_child_names;
+        inode.children=new_children;      
+
+    def _invalidate_inode(self,inode):
+        for handle in inode.open_file_handles:
+            del self._open_file_handles[handle];
+        del self._inodes[inode.inode_number];
+        self._cache.remove_file(inode.path);
+        
     def get_node_from_tree(self,path):
+        return self.get_node_from_explicit_tree(path,self.tree);
+
+    @staticmethod
+    def get_node_from_explicit_tree(path,tree):
         parts=path.split("/");
-        subtree=self.tree;
+        subtree=tree;
         for p in parts:
             if p!="":
                 if "dir" in subtree and p in subtree["dir"]:
