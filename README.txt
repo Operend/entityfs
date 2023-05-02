@@ -3,7 +3,7 @@
   Unfortunately, the two packages are incompatible.
   If you're not virtualizing your Python environments, you might need
   to actually uninstall fusepy before installing fuse-python.
-- fuse-python depends on having "libfuse-dev" on the system, not just "libfuse"
+- fuse-python depends on having "libfuse3-dev" on the system, not just "libfuse"
 - To configure, either: cp example.ini ~/.entityfs
   OR: cp example.ini WHEREVER; export ENTITYFS_CONFIG=WHEREVER;
   then edit that file as necessary
@@ -33,7 +33,7 @@ FILE PATH RULES STUFF (not done implementing yet):
 
 QuickStart:
 1) Ensure using python 3.9.7
-2) Ensure fuse3 is installed
+2) Ensure fuse3, libfuse3-dev and python3-dev are installed
 3) Install virtual a virtual env
     pip install -m venv venvname
 4) Install System Pre-Reqs (assuming Ubuntu):
