@@ -8,11 +8,8 @@
   OR: cp example.ini WHEREVER; export ENTITYFS_CONFIG=WHEREVER;
   then edit that file as necessary
 - To start: entityfs.py [mountpoint] [options]
-  Thanks to fuse-python, there are many built-in command-line options,
-  visible with --help.
-  -o auto_unmount and -s (single-threaded) are automatically enabled.
-  Access to the auto_unmount option was the motivating factor for the
-  change from fusepy to fuse-python.
+  The main option is --config FILENAME, to point at a config file
+  without using a command line argument.
 - To cleanly unmount: fusermount -u [mountpoint]
   In my testing, kill or even kill -9 on the PID of the python script is
   also clean, thanks to the auto_unmount option.
@@ -28,8 +25,7 @@ FILE PATH RULES STUFF (not done implementing yet):
 - rules=myrule* will fetch and use all FilePathRules starting with "myrule", which would include myrule1,myrule2 if those exist. This is only for a trailing asterisk, not a non-trailing asterisk or any other type of wildcard.
 - When multiple rules or entities create overlapping paths to separate files, those paths form an appropriately branching directory tree.
 - When multiple rules or entities create the same path to different files, priority amongst them is decided arbitrarily.
-- Currently, file path rules are applied once when ENTITYFS starts up. Changing entities or rules server-side after ENTITYFS has already started doesn't affect what ENTITYFS shows. This might be the wrong behavior in some cases, but the alternative is potentially much slower and harder to ensure consistency on. Alternate behavior may need speccing out!
-
+- Currently, file path rules are applied once when ENTITYFS starts up, and (optionally) on the next access after the refresh_file named in the configuration file gets deleted, recreated, or has its modification time changed. refresh_file operation is new and experimental.
 
 QuickStart:
 1) Ensure using python 3.9.7
